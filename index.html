@@ -53,8 +53,8 @@
   #hurt{position:fixed;inset:0;pointer-events:none;z-index:7;opacity:0;transition:opacity .18s ease;
     background:radial-gradient(ellipse at center,transparent 52%,rgba(226,48,48,.5))}
   #caveVig{position:fixed;inset:0;pointer-events:none;z-index:4;opacity:0;transition:opacity .9s ease;
-    background:linear-gradient(180deg,rgba(14,9,5,.88) 0%,rgba(14,9,5,.35) 14%,transparent 30%),
-      radial-gradient(ellipse 120% 90% at 50% 62%,transparent 58%,rgba(14,9,5,.55) 100%)}
+    background:linear-gradient(180deg,rgba(10,6,3,.96) 0%,rgba(12,7,4,.55) 12%,transparent 32%),
+      radial-gradient(ellipse 130% 95% at 50% 60%,transparent 52%,rgba(10,6,3,.7) 100%)}
   #dinoRow{display:flex;gap:14px;align-items:center}
   .dino{width:74px;height:74px;border-radius:50%;border:4px solid #fff;cursor:pointer;padding:0;
     background:#fff8e8 center/88% no-repeat;box-shadow:0 5px 0 rgba(0,0,0,.28);position:relative;
@@ -377,6 +377,9 @@ const rockWallTex = canvasTex(512, 256, (ctx, w, h) => {
     while (y < h) { y += 20 + Math.random() * 30; x += Math.random() * 40 - 20; ctx.lineTo(x, y); }
     ctx.stroke();
   }
+  const g = ctx.createLinearGradient(0, 0, 0, h);        // dark near the ceiling
+  g.addColorStop(0, 'rgba(12,7,4,.85)'); g.addColorStop(0.45, 'rgba(12,7,4,.25)'); g.addColorStop(1, 'rgba(12,7,4,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
 }, 8, 1);
 const cloudTex = (() => {
   const c = document.createElement('canvas');
@@ -393,10 +396,11 @@ const cloudTex = (() => {
 
 /* ------------------------- stage config ------------------------- */
 const STAGE_CFG = {
-  jungle: { bg: 'bg-jungle', sky: 0x8fd3f0, bgY: 44, fog: 0xc8e6c9, fogNear: 32, fogFar: 105, tint: 0xffffff, player: 'run' },
-  night:  { bg: 'bg-night',  sky: 0x141c46, bgY: 44, fog: 0x2c3168, fogNear: 24, fogFar: 95,  tint: 0xaab2e0, player: 'run' },
-  cave:   { bg: 'bg-cave',   sky: 0x1c130c, bgY: 40, fog: 0x2a1c12, fogNear: 14, fogFar: 72,  tint: 0xdcc6a4, player: 'torch' },
-  fly:    { bg: 'bg-sky',    sky: 0xbfe3f7, bgY: 0,  fog: 0xcfe9fa, fogNear: 60, fogFar: 170, tint: 0xffffff, player: 'fly' }
+  jungle: { bg: 'bg-jungle', sky: 0x8fd3f0, bgY: 44, bgZ: -118, bgW: 260, fog: 0xc8e6c9, fogNear: 32, fogFar: 105, tint: 0xffffff, player: 'run' },
+  night:  { bg: 'bg-night',  sky: 0x141c46, bgY: 44, bgZ: -118, bgW: 260, fog: 0x2c3168, fogNear: 24, fogFar: 95,  tint: 0xaab2e0, player: 'run' },
+  /* cave: the whole tunnel image sits small at the corridor's end, like a glowing cave mouth */
+  cave:   { bg: 'bg-cave',   sky: 0x120b07, bgY: 4.2, bgZ: -100, bgW: 15, fog: 0x2a1c12, fogNear: 14, fogFar: 78, tint: 0xdcc6a4, player: 'torch' },
+  fly:    { bg: 'bg-sky',    sky: 0xbfe3f7, bgY: 0,  bgZ: -118, bgW: 260, fog: 0xcfe9fa, fogNear: 60, fogFar: 170, tint: 0xffffff, player: 'fly' }
 };
 scene.background = new THREE.Color(STAGE_CFG.jungle.sky);
 scene.fog = new THREE.Fog(STAGE_CFG.jungle.fog, 32, 105);
@@ -412,6 +416,15 @@ function applyTint(hex, flick) {
 
 /* ------------------------- world ------------------------- */
 /* background plane */
+const bgAlphaTex = (() => {                               // soft oval mask for the cave mouth
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 128;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(128, 64, 20, 128, 64, 120);
+  g.addColorStop(0, '#fff'); g.addColorStop(0.6, '#fff'); g.addColorStop(1, '#000');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 256, 128);
+  return new THREE.CanvasTexture(c);
+})();
 const bgMat = new THREE.MeshBasicMaterial({ fog: false });
 const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(260, 146), bgMat);
 bgMesh.position.set(0, 44, -118);
@@ -428,7 +441,7 @@ const path = new THREE.Mesh(new THREE.PlaneGeometry(7.8, 320), pathMat);
 path.rotation.x = -Math.PI / 2; path.position.set(0, 0, -80);
 groundG.add(path);
 
-/* cave walls + ceiling shadowing */
+/* cave walls + rock ceiling (a closed tunnel) */
 const wallG = new THREE.Group(); scene.add(wallG);
 const wallMat = tintable(new THREE.MeshBasicMaterial({ map: rockWallTex }));
 for (const s of [-1, 1]) {
@@ -436,6 +449,31 @@ for (const s of [-1, 1]) {
   wall.position.set(s * 5.6, 4.5, -80);
   wall.rotation.y = s > 0 ? -Math.PI / 2 : Math.PI / 2;
   wallG.add(wall);
+}
+const ceilTex = canvasTex(512, 256, (ctx, w, h) => {
+  ctx.fillStyle = '#241810'; ctx.fillRect(0, 0, w, h);
+  speckle(ctx, w, h, 900, ['rgba(10,6,3,.45)', 'rgba(90,64,42,.2)', 'rgba(255,176,80,.05)'], 4.5);
+  ctx.strokeStyle = 'rgba(10,6,3,.6)'; ctx.lineWidth = 3;
+  for (let i = 0; i < 12; i++) {
+    ctx.beginPath();
+    let x = Math.random() * w, y = 0;
+    ctx.moveTo(x, y);
+    while (y < h) { y += 25 + Math.random() * 30; x += Math.random() * 50 - 25; ctx.lineTo(x, y); }
+    ctx.stroke();
+  }
+}, 8, 1);
+/* deliberately not tinted: the ceiling stays deep in shadow */
+const ceilMat = new THREE.MeshBasicMaterial({ map: ceilTex });
+const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(18, 320), ceilMat);
+ceiling.rotation.x = Math.PI / 2;                        // faces down at the runner
+ceiling.rotation.z = Math.PI / 2;
+ceiling.position.set(0, 7.3, -80);
+wallG.add(ceiling);
+/* dark rock arches hanging across the tunnel for depth */
+for (let i = 0; i < 5; i++) {
+  const rib = new THREE.Mesh(new THREE.BoxGeometry(13, 1.8, 2.0), ceilMat);
+  rib.position.set(0, 6.9, -14 - i * 18);
+  wallG.add(rib);
 }
 wallG.visible = false;
 
@@ -511,7 +549,7 @@ function buildTemplates() {
   def('bush', 'bush', 1.6, 1.0);
   def('stone-block', 'stone-block', 2.0, 1.2);
   def('stalagmite', 'stalagmite', 1.35, 0.7);
-  def('stalactite', 'stalactite', 3.0, 0, 1.6);           // hangs: bottom at slide height
+  def('stalactite', 'stalactite', 4.6, 0, 1.8);           // hangs from the cave ceiling down to slide height
   def('ptero', 'ptero-enemy', 1.7, 0, 0.9);
   def('egg', 'egg', 0.85, 0.45);
   def('coin', 'coin', 1.15, 0.5);
@@ -673,8 +711,13 @@ function setStage(name) {
   const cfg = STAGE_CFG[name];
   bgMat.map = TEX[cfg.bg]; bgMat.needsUpdate = true;
   bgMesh.position.y = cfg.bgY;
-  const mf = window.MANIFEST[cfg.bg];                     // fit plane to image aspect
-  bgMesh.scale.x = (mf.w / mf.h) / (260 / 146);
+  bgMesh.position.z = cfg.bgZ;
+  const mf = window.MANIFEST[cfg.bg];                     // fit plane to image aspect + stage size
+  const s = cfg.bgW / 260;
+  bgMesh.scale.set(s * (mf.w / mf.h) / (260 / 146), s, 1);
+  bgMat.alphaMap = name === 'cave' ? bgAlphaTex : null;   // melt the cave mouth into darkness
+  bgMat.transparent = name === 'cave';
+  bgMat.needsUpdate = true;
   scene.background.set(cfg.sky);
   scene.fog.color.set(cfg.fog);
   scene.fog.near = cfg.fogNear; scene.fog.far = cfg.fogFar;
