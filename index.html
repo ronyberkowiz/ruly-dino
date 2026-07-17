@@ -207,20 +207,34 @@ function initAudio() {
     AC = new (window.AudioContext || window.webkitAudioContext)();
     master = AC.createGain(); master.gain.value = 1; master.connect(AC.destination);
     for (const [name, url] of Object.entries(window.SOUNDS || {})) {
-      AC.decodeAudioData(b64ToBuf(url)).then(buf => { SAMPLES[name] = buf; }).catch(() => {});
+      AC.decodeAudioData(b64ToBuf(url)).then(buf => { SAMPLES[name] = buf; })
+        .catch(e => console.warn('sound decode failed:', name, e && e.message));
     }
   } catch (e) {}
 }
+const AEL = {};                                           // <audio> fallback when WebAudio can't decode
 function play(name, vol) {
-  if (!AC || muted || !SAMPLES[name]) return false;
+  if (muted) return false;
+  if (AC && SAMPLES[name]) {
+    try {
+      const src = AC.createBufferSource(), g = AC.createGain();
+      src.buffer = SAMPLES[name];
+      g.gain.value = vol === undefined ? 0.9 : vol;
+      src.connect(g).connect(master);
+      /* the recordings start ~1s in — skip the silence (music plays whole) */
+      const skip = name !== 'music' && src.buffer.duration > 1.3 ? 1 : 0;
+      src.start(0, skip);
+      return true;
+    } catch (e) {}
+  }
+  const url = (window.SOUNDS || {})[name];
+  if (!url) return false;
   try {
-    const src = AC.createBufferSource(), g = AC.createGain();
-    src.buffer = SAMPLES[name];
-    g.gain.value = vol === undefined ? 0.9 : vol;
-    src.connect(g).connect(master);
-    /* the recordings start ~1s in — skip the silence (music plays whole) */
-    const skip = name !== 'music' && src.buffer.duration > 1.3 ? 1 : 0;
-    src.start(0, skip);
+    let a = AEL[name];
+    if (!a) { a = new Audio(url); a.preload = 'auto'; AEL[name] = a; }
+    a.volume = Math.min(1, vol === undefined ? 0.9 : vol);
+    try { a.currentTime = name === 'music' ? 0 : 1; } catch (e) {}
+    a.play().catch(() => {});
     return true;
   } catch (e) { return false; }
 }
@@ -629,9 +643,9 @@ function buildTemplates() {
   def('coin', 'coin', 1.15, 0.5);
   for (let i = 1; i <= 3; i++) def('fern' + i, 'fern' + i, 1, 0);
   if (window.MANIFEST.mushrooms) def('mushrooms', 'mushrooms', 1, 0);
-  if (window.MANIFEST.magnet) def('magnet', 'magnet', 1.0, 0.5);
+  if (window.MANIFEST.magnet) def('magnet', 'magnet', 1.3, 0.65);
   if (window.MANIFEST.bubble) def('bubble', 'bubble', 1.0, 0.5);
-  if (window.MANIFEST.chest) def('chest', 'chest', 1.6, 0.8);
+  if (window.MANIFEST.chest) def('chest', 'chest', 1.9, 0.95);
   def('egg-speed', 'egg-speed', 0.95, 0.5);
   /* rolling boulder: a real 3D sphere that spins toward the player — gray rock wrapped in moss */
   const ballTex = canvasTex(256, 256, (ctx, w, h) => {
@@ -789,8 +803,9 @@ function buildTemplates() {
     const g = new THREE.Group();
     let b;
     if (window.MANIFEST.canopy) {
-      b = billboard('canopy', 5.5);
-      b.position.y = -2.2;
+      b = billboard('canopy', 3.4);                      // just the crown pokes above the clouds
+      b.scale.x *= 0.72;
+      b.position.y = -1.0;
     } else {
       b = billboard('fern' + (1 + ((Math.random() * 3) | 0)), 6);
       b.position.y = -2.6;
@@ -1374,10 +1389,9 @@ function update(dt) {
           play('yay', 1); sndPwr(); sndSpin();
           if (S.stage !== 'fly') { S.jumpT = 0; S.spin = true; S.superJ = false; }
           const roll = Math.random();
-          if (roll < 0.3) { S.eggs += 10; addTotal(10); syncHud(); }
-          else if (roll < 0.55) S.magnetT = 8;
-          else if (roll < 0.8) { S.shield = true; S.shieldT = SHIELD_TIME; P.bubble.visible = true; }
-          else startFly();
+          if (roll < 0.5) { S.eggs += 10; addTotal(10); syncHud(); }
+          else if (roll < 0.78) S.magnetT = 8;
+          else { S.shield = true; S.shieldT = SHIELD_TIME; P.bubble.visible = true; }
         }
         else startFly();
       } else {
@@ -1385,6 +1399,8 @@ function update(dt) {
         if (!rule) continue;                             // decor (gate etc.)
         /* block trains can be jumped onto and ridden */
         if (en.kind === 'stone-block' && (S.onTop || jumpHigh || S.groundY > 0.8)) continue;
+        /* a super jump (double-up) clears even the rolling boulder */
+        if (en.kind === 'rollrock' && S.superJ && jumpHigh) continue;
         const safe = (rule === 'jump' && jumpHigh) || (rule === 'slide' && sliding);
         if (safe) {
           if (rule === 'slide' && !en.cheered && S.t - lastCheer > 5) {   // nailed the slide!
