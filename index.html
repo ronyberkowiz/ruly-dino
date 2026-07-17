@@ -71,6 +71,18 @@
     filter:drop-shadow(0 2px 2px rgba(0,0,0,.4));animation:boing 1.2s ease-in-out infinite}
   #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:8;
     transition:opacity .45s ease}
+  #wind{position:fixed;top:26%;left:50%;transform:translate(-50%,-50%);z-index:6;font-size:64px;
+    opacity:0;pointer-events:none;transition:opacity .15s ease;
+    filter:drop-shadow(0 4px 6px rgba(0,0,0,.35));animation:windPulse .5s ease-in-out infinite}
+  @keyframes windPulse{0%,100%{transform:translate(-50%,-50%) scale(1)}50%{transform:translate(-54%,-50%) scale(1.12)}}
+  #volcanoFx{position:fixed;inset:0;pointer-events:none;z-index:6;opacity:0;transition:opacity .8s ease;
+    background:radial-gradient(ellipse at center,transparent 42%,rgba(226,84,20,.45))}
+  #catchFx{position:fixed;inset:0;z-index:9;display:none;align-items:center;justify-content:center;
+    pointer-events:none;background:radial-gradient(ellipse at center,transparent 30%,rgba(180,40,20,.35))}
+  #catchFx img,#catchFx .emoji{max-width:70vmin;max-height:70vmin;font-size:40vmin;line-height:1;
+    animation:catchZoom .95s ease-in forwards;filter:drop-shadow(0 10px 24px rgba(0,0,0,.5))}
+  @keyframes catchZoom{0%{transform:scale(.12) rotate(-8deg);opacity:0}
+    30%{opacity:1}100%{transform:scale(1.25) rotate(4deg);opacity:1}}
   #hurt{position:fixed;inset:0;pointer-events:none;z-index:7;opacity:0;transition:opacity .18s ease;
     background:radial-gradient(ellipse at center,transparent 52%,rgba(226,48,48,.5))}
   #caveVig{position:fixed;inset:0;pointer-events:none;z-index:4;opacity:0;transition:opacity .9s ease;
@@ -97,6 +109,9 @@
 <button id="muteBtn" aria-label="sound">🔊</button>
 <div id="flash"></div>
 <div id="hurt"></div>
+<div id="wind">💨</div>
+<div id="volcanoFx"></div>
+<div id="catchFx"></div>
 <div id="caveVig"></div>
 <div id="boostFx"></div>
 <div id="overlay">
@@ -140,9 +155,18 @@ const S = {
   stage: 'jungle', nextCaveAt: CAVE_EVERY, caveEndAt: 0, flyUntil: 0, lastCoin: 0,
   transitioning: false, jumpCount: 0, spin: false, gateIn: -1, gateOut: -1, hurtT: 0,
   groundStage: 'jungle', magnetT: 0, shield: false, lastPwr: 0, boostT: 0, chaseT: 0,
-  onTop: false, groundY: 0, shieldT: 0, rollT: -1, rollDir: 1, superJ: false, startTotal: 0
+  onTop: false, groundY: 0, shieldT: 0, rollT: -1, rollDir: 1, superJ: false, startTotal: 0,
+  water: false
 };
-let lastDir = '', lastDirAt = -9, lastCheer = -9;
+let lastDir = '', lastDirAt = -9;
+/* fly wind gusts */
+let windT = -1, windNext = 8, windDir = 1, windPushed = false;
+/* volcano eruption */
+let volcanoT = 0, volcanoAt = 550, volcanoRockT = 0;
+/* river / Tarzan swing */
+let swingT = -1, swingDir = 1, camW = 0;
+let riverAt = 280, riverEnd = 0, riverVineDone = false;
+const LAVA = new THREE.Color(0xff6a3a), tmpC = new THREE.Color();
 
 /* ------------------------- HUD ------------------------- */
 const $ = id => document.getElementById(id);
@@ -152,6 +176,7 @@ const bestPill = $('bestPill'), bestEl = $('bestCount');
 const flyBar = $('flyBar'), flyFill = $('flyFill'), flashEl = $('flash'), hurtEl = $('hurt');
 const caveVig = $('caveVig'), scorePill = $('scorePill'), scoreEl = $('scoreCount');
 const boostFx = $('boostFx');
+const windEl = $('wind'), volcanoFx = $('volcanoFx'), catchFx = $('catchFx');
 
 /* ---------------- mounts (dino selection) ---------------- */
 const DINOS = {
@@ -201,14 +226,24 @@ function b64ToBuf(dataUrl) {
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return arr.buffer;
 }
+const SKIP = {};                                          // per-recording lead-in silence (seconds)
+function leadIn(buf) {
+  const d = buf.getChannelData(0), sr = buf.sampleRate;
+  let i = 0;
+  while (i < d.length && Math.abs(d[i]) < 0.02) i++;
+  return Math.max(0, i / sr - 0.06);                      // keep a hair of run-up
+}
 function initAudio() {
   if (AC) return;
   try {
     AC = new (window.AudioContext || window.webkitAudioContext)();
     master = AC.createGain(); master.gain.value = 1; master.connect(AC.destination);
     for (const [name, url] of Object.entries(window.SOUNDS || {})) {
-      AC.decodeAudioData(b64ToBuf(url)).then(buf => { SAMPLES[name] = buf; })
-        .catch(e => console.warn('sound decode failed:', name, e && e.message));
+      AC.decodeAudioData(b64ToBuf(url)).then(buf => {
+        SAMPLES[name] = buf;
+        SKIP[name] = name === 'music' ? 0 : leadIn(buf);  // music loops back to 0, don't shift it
+        console.log('sound ready:', name, buf.duration.toFixed(2) + 's, skip ' + SKIP[name].toFixed(2) + 's');
+      }).catch(e => console.warn('sound decode failed:', name, e && e.message));
     }
   } catch (e) {}
 }
@@ -221,9 +256,7 @@ function play(name, vol) {
       src.buffer = SAMPLES[name];
       g.gain.value = vol === undefined ? 0.9 : vol;
       src.connect(g).connect(master);
-      /* the recordings start ~1s in — skip the silence (music plays whole) */
-      const skip = name !== 'music' && src.buffer.duration > 1.3 ? 1 : 0;
-      src.start(0, skip);
+      src.start(0, SKIP[name] || 0);                      // jump past measured lead-in silence
       return true;
     } catch (e) {}
   }
@@ -233,7 +266,7 @@ function play(name, vol) {
     let a = AEL[name];
     if (!a) { a = new Audio(url); a.preload = 'auto'; AEL[name] = a; }
     a.volume = Math.min(1, vol === undefined ? 0.9 : vol);
-    try { a.currentTime = name === 'music' ? 0 : 1; } catch (e) {}
+    try { a.currentTime = SKIP[name] || 0; } catch (e) {}
     a.play().catch(() => {});
     return true;
   } catch (e) { return false; }
@@ -251,7 +284,14 @@ function tone(f0, f1, dur, type, vol) {
 const sndEgg  = () => { if (play('egg')) return; tone(760, 1180, 0.12, 'sine', 0.2); tone(1180, 1560, 0.14, 'sine', 0.12); };
 const sndCoin = () => { play('letsgo', 1); if (play('coin')) return; tone(660, 990, 0.15, 'square', 0.08); tone(990, 1320, 0.25, 'sine', 0.16); };
 const sndJump = () => { if (play('jump')) return; tone(300, 640, 0.2, 'triangle', 0.15); };
-const sndSlide= () => { if (play('slide')) return; tone(500, 220, 0.22, 'triangle', 0.13); };
+let lastSlideVoice = -9;
+const sndSlide= () => {                                   // Ruly cheers the slide (short cooldown vs spam)
+  const now = performance.now() / 1000;
+  if (now - lastSlideVoice > 3 && play('successslide', 1)) { lastSlideVoice = now; return; }
+  if (play('slide')) return;
+  tone(500, 220, 0.22, 'triangle', 0.13);
+};
+const sndLand = () => tone(500, 220, 0.22, 'triangle', 0.13);
 const sndHit  = () => { play('ouch', 1); if (play('hit')) return; tone(220, 90, 0.3, 'square', 0.12); tone(160, 70, 0.35, 'sawtooth', 0.07); };
 let overFlip = false;
 const sndOver = () => {
@@ -302,7 +342,7 @@ $('muteBtn').addEventListener('click', () => {
 
 /* ------------------------- input ------------------------- */
 function act(dir) {
-  if (!S.running || S.over) return;
+  if (!S.running || S.over || swingT >= 0) return;
   const now = performance.now() / 1000;
   const dbl = dir === lastDir && now - lastDirAt < DOUBLE_TAP;
   if (dir === 'left'  && S.lane > -1) { S.laneFrom = S.laneF; S.lane--; S.laneT = 0; }
@@ -316,7 +356,7 @@ function act(dir) {
   if (dir === 'up' && S.jumpT >= 0 && S.jumpT < 0.55 && !S.spin && !S.superJ) {
     S.superJ = true;                                   // double-up: super jump!
     S.jumpT = Math.min(S.jumpT, 0.3) * 0.6;
-    sndSpin();
+    if (!play('yay', 1)) sndSpin();
     return;
   }
   if (dir === 'up'   && S.jumpT < 0 && S.slideT < 0) {
@@ -588,6 +628,149 @@ for (let i = 0; i < 16; i++) {
 }
 cloudG.visible = false;
 
+/* ---------------- ambience: pollen, butterflies, rays, crystals, weather ---------------- */
+/* jungle: drifting golden pollen motes + a few butterflies */
+const pollenG = new THREE.Group(); scene.add(pollenG);
+{
+  const mat = new THREE.MeshBasicMaterial({ map: fireflyTex, color: 0xfff0b0, transparent: true,
+    opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+  for (let i = 0; i < 16; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.14, 0.14), mat);
+    m.position.set((Math.random() * 2 - 1) * 6, 0.5 + Math.random() * 3, -(i / 16) * VIEW);
+    m.userData = { ph: Math.random() * 7, bx: m.position.x, by: m.position.y };
+    pollenG.add(m);
+  }
+}
+const butterflies = [];
+{
+  const cols = [0xff8ac2, 0x8ad2ff, 0xffd94d, 0xc59aff, 0xff9a6a];
+  for (let i = 0; i < 5; i++) {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshBasicMaterial({ color: cols[i % cols.length], side: THREE.DoubleSide, fog: false });
+    for (const s of [-1, 1]) {
+      const wing = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.3), mat);
+      wing.geometry.translate(s * 0.12, 0, 0);
+      wing.userData.s = s;
+      g.add(wing);
+    }
+    g.position.set((i % 2 ? 1 : -1) * (3.2 + Math.random() * 3), 1 + Math.random() * 1.8, -Math.random() * 50);
+    g.userData = { ph: Math.random() * 7, bx: g.position.x, by: g.position.y };
+    butterflies.push(g); pollenG.add(g);
+  }
+}
+/* jungle: soft slanted sun rays */
+const rayG = new THREE.Group(); scene.add(rayG);
+{
+  const c = document.createElement('canvas'); c.width = 64; c.height = 256;
+  const ctx = c.getContext('2d');
+  const gr = ctx.createLinearGradient(0, 0, 0, 256);
+  gr.addColorStop(0, 'rgba(255,244,190,.5)'); gr.addColorStop(1, 'rgba(255,244,190,0)');
+  ctx.fillStyle = gr; ctx.fillRect(0, 0, 64, 256);
+  const mat = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true,
+    opacity: 0.32, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+  for (let i = 0; i < 3; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(2.4 + i * 1.2, 26), mat);
+    m.position.set(-7 + i * 6, 14, -48 - i * 7);
+    m.rotation.z = 0.35;
+    rayG.add(m);
+  }
+}
+/* cave: glowing crystals along the walls */
+const crystalG = new THREE.Group(); scene.add(crystalG); crystalG.visible = false;
+const crystals = [];
+{
+  const cols = [0x7fe8ff, 0xb08cff, 0x7fffc8];
+  for (let i = 0; i < 14; i++) {
+    const col = cols[i % 3];
+    const g = new THREE.Group();
+    const spike = new THREE.Mesh(new THREE.ConeGeometry(0.15 + Math.random() * 0.12, 0.5 + Math.random() * 0.7, 5),
+      new THREE.MeshBasicMaterial({ color: col }));
+    spike.position.y = 0.28; spike.rotation.z = (Math.random() - 0.5) * 0.6;
+    g.add(spike);
+    const halo = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 1.1),
+      new THREE.MeshBasicMaterial({ map: fireflyTex, color: col, transparent: true, opacity: 0.45,
+        depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    halo.position.y = 0.5;
+    g.add(halo);
+    g.userData = { halo, ph: Math.random() * 7 };
+    g.position.set((i % 2 ? 1 : -1) * (4.3 + Math.random() * 0.9), 0, -(i / 14) * VIEW);
+    crystals.push(g); crystalG.add(g);
+  }
+}
+/* night: an occasional shooting star */
+const star = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.16),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false,
+    blending: THREE.AdditiveBlending, fog: false }));
+star.position.set(0, 32, -110); star.rotation.z = -0.28;
+scene.add(star);
+let starT = -1, starNext = 5;
+/* weather: rain streaks / wind-blown leaves / rainbow (jungle only) */
+const rainG = new THREE.Group(); scene.add(rainG); rainG.visible = false;
+const rains = [];
+{
+  const mat = new THREE.MeshBasicMaterial({ color: 0xbfe0ff, transparent: true, opacity: 0.42, depthWrite: false, fog: false });
+  for (let i = 0; i < 70; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.03, 0.65), mat);
+    m.position.set(Math.random() * 26 - 8, Math.random() * 10, -Math.random() * 55);
+    m.rotation.z = 0.12;
+    rains.push(m); rainG.add(m);
+  }
+}
+const leafG = new THREE.Group(); scene.add(leafG); leafG.visible = false;
+const leaves = [];
+{
+  const cols = [0x74b84e, 0x9ed05e, 0xd8a24a, 0xc4783c];
+  for (let i = 0; i < 26; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.16),
+      new THREE.MeshBasicMaterial({ color: cols[i % cols.length], side: THREE.DoubleSide, fog: false }));
+    m.position.set(Math.random() * 20 - 10, 0.4 + Math.random() * 3.4, -Math.random() * 50);
+    m.userData = { ph: Math.random() * 7, sp: 3.5 + Math.random() * 3 };
+    leaves.push(m); leafG.add(m);
+  }
+}
+const rainbow = (() => {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+  const ctx = c.getContext('2d');
+  ['#ff5f5f', '#ffb14d', '#ffe94d', '#7fe37f', '#6fb6ff', '#b08cff'].forEach((col, i) => {
+    ctx.strokeStyle = col; ctx.lineWidth = 10; ctx.globalAlpha = 0.85;
+    ctx.beginPath(); ctx.arc(256, 256, 210 - i * 10, Math.PI, 2 * Math.PI); ctx.stroke();
+  });
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(95, 47),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, opacity: 0,
+      depthWrite: false, fog: false }));
+  m.position.set(6, 13, -112);
+  scene.add(m);
+  return m;
+})();
+const WX = { mode: 'clear', t: 0, next: 22 + Math.random() * 18 };
+function clearWeather() {
+  WX.mode = 'clear'; WX.t = 0; WX.next = 22 + Math.random() * 18;
+  rainG.visible = leafG.visible = false;
+  rainbow.material.opacity = 0;
+  for (const p of plants) p.rotation.z = 0;
+}
+
+/* river strip beside the track (water stage) */
+const RIVER_OFF = 4;                                      // river center, in lanes right of the path
+const waterTex = canvasTex(256, 1024, (ctx, w, h) => {
+  ctx.fillStyle = '#3f9fd8'; ctx.fillRect(0, 0, w, h);
+  speckle(ctx, w, h, 260, ['rgba(255,255,255,.16)', 'rgba(26,88,138,.25)', 'rgba(160,225,255,.22)'], 3);
+  ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 2;
+  for (let i = 0; i < 46; i++) {
+    const y = Math.random() * h, x = Math.random() * w;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(x + 18, y + 5, x + 38, y); ctx.stroke();
+  }
+}, 1, 10);
+const riverG = new THREE.Group(); scene.add(riverG); riverG.visible = false;
+const waterMat = tintable(new THREE.MeshBasicMaterial({ map: waterTex }));
+{
+  const water = new THREE.Mesh(new THREE.PlaneGeometry(7.6, 320), waterMat);
+  water.rotation.x = -Math.PI / 2;
+  water.position.set(RIVER_OFF * LANE_X, 0.015, -80);
+  riverG.add(water);
+}
+const riverDeco = [];
+
 /* ------------------------- billboards ------------------------- */
 function billboard(name, height) {
   const mf = window.MANIFEST[name];
@@ -609,6 +792,12 @@ function blob(parent, r) {
 
 /* obstacle/collectible templates: kind -> () => Object3D */
 let TPL = {};
+/* tintable material that keeps its own hue under the global stage tint */
+function colMat(hex) {
+  const m = tintable(new THREE.MeshBasicMaterial({ color: hex }));
+  m.userData.baseTint.set(hex);
+  return m;
+}
 function buildTemplates() {
   const def = (kind, name, h, shadowR, y0) => {
     TPL[kind] = () => {
@@ -735,8 +924,8 @@ function buildTemplates() {
       g.add(b);
       g.userData.sprite = b;
     } else {
-      const bodyM = tintable(new THREE.MeshBasicMaterial({ color: 0x54b04a }));
-      const bellyM = tintable(new THREE.MeshBasicMaterial({ color: 0x8fd46a }));
+      const bodyM = colMat(0x54b04a);
+      const bellyM = colMat(0x8fd46a);
       for (let i = 0; i < 7; i++) {
         const r = 0.24 - i * 0.02;
         const seg = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), i % 2 ? bellyM : bodyM);
@@ -781,6 +970,7 @@ function buildTemplates() {
     pad.position.y = 0.03;
     g.add(pad);
     const bubM = tintable(new THREE.MeshBasicMaterial({ color: 0xaacf70, transparent: true, opacity: 0.85 }));
+    bubM.userData.baseTint.set(0xaacf70);
     for (let i = 0; i < 3; i++) {
       const b = new THREE.Mesh(new THREE.SphereGeometry(0.07 + i * 0.03, 8, 6), bubM);
       b.position.set(-0.5 + i * 0.5, 0.1, (i % 2 ? 0.25 : -0.2));
@@ -815,6 +1005,139 @@ function buildTemplates() {
     g.userData.sprite = b;
     return g;
   };
+  /* fly: golden bonus ring — glide through it */
+  TPL.ring = () => {
+    const g = new THREE.Group();
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.13, 10, 28),
+      colMat(0xffd94d));
+    ring.position.y = 0.9;
+    g.add(ring);
+    const halo = new THREE.Mesh(new THREE.PlaneGeometry(2.7, 2.7),
+      new THREE.MeshBasicMaterial({ map: fireflyTex, color: 0xffe98c, transparent: true, opacity: 0.35,
+        depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    halo.position.y = 0.9;
+    g.add(halo);
+    g.userData.sprite = ring;
+    return g;
+  };
+  /* fly: storm cloud — blocks the lane, flashes lightning as a warning */
+  const boltTex = canvasTex(64, 128, (ctx, w, h) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#fff36b'; ctx.lineWidth = 9; ctx.lineJoin = 'miter';
+    ctx.beginPath(); ctx.moveTo(40, 4); ctx.lineTo(22, 56); ctx.lineTo(38, 60); ctx.lineTo(18, 122); ctx.stroke();
+  }, 1, 1);
+  TPL.storm = () => {
+    const g = new THREE.Group();
+    const cl = new THREE.Mesh(new THREE.PlaneGeometry(3.1, 1.6),
+      new THREE.MeshBasicMaterial({ map: cloudTex, color: 0x5a6274, transparent: true, depthWrite: false }));
+    cl.position.y = 1.35;
+    g.add(cl);
+    const bolt = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 1.1),
+      new THREE.MeshBasicMaterial({ map: boltTex, transparent: true, opacity: 0, depthWrite: false,
+        blending: THREE.AdditiveBlending, fog: false }));
+    bolt.position.y = 0.35;
+    g.add(bolt);
+    g.userData.bolt = bolt;
+    g.userData.sprite = cl;
+    return g;
+  };
+  /* volcano: boulder crashing down from the sky, with a target marker on the ground */
+  TPL.fallrock = () => {
+    const g = TPL.rollrock();
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.5, 0.85, 24),
+      new THREE.MeshBasicMaterial({ color: 0xff5030, transparent: true, opacity: 0.55, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2; ring.position.y = 0.05;
+    g.add(ring);
+    g.userData.ring = ring;
+    return g;
+  };
+  /* river: Tarzan vine hanging over the track — jump into it! */
+  TPL.vine = () => {
+    const g = new THREE.Group();
+    if (window.MANIFEST.vine) {
+      const b = billboard('vine', 4.2);
+      b.position.y = 1.35;
+      g.add(b);
+      g.userData.sprite = b;
+    } else {
+      const branch = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 4.6, 8),
+        tintable(new THREE.MeshBasicMaterial({ map: barkTex })));
+      branch.rotation.z = Math.PI / 2 - 0.06; branch.position.y = 5.3;
+      const rope = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 3.6, 6),
+        colMat(0x4a7d32));
+      rope.position.y = 3.4;
+      const loop = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.06, 6, 12),
+        colMat(0x4a7d32));
+      loop.position.y = 1.66;
+      g.add(branch); g.add(rope); g.add(loop);
+      g.userData.sprite = rope;
+    }
+    return g;
+  };
+  /* river: shark fin cruising between lanes */
+  TPL.shark = () => {
+    const g = new THREE.Group();
+    if (window.MANIFEST['shark-fin']) {
+      const b = billboard('shark-fin', 1.25);
+      g.add(b);
+      g.userData.sprite = b;
+    } else {
+      const fin = new THREE.Mesh(new THREE.ConeGeometry(0.45, 1.05, 4),
+        colMat(0x7d8894));
+      fin.scale.z = 0.3; fin.position.y = 0.5; fin.rotation.y = Math.PI / 4;
+      g.add(fin);
+      g.userData.sprite = fin;
+    }
+    const wake = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.62, 16),
+      new THREE.MeshBasicMaterial({ color: 0xdff2ff, transparent: true, opacity: 0.5, depthWrite: false }));
+    wake.rotation.x = -Math.PI / 2; wake.position.y = 0.04;
+    g.add(wake);
+    return g;
+  };
+  /* river: crocodile floating flat — jump over it */
+  TPL.croc = () => {
+    const g = new THREE.Group();
+    if (window.MANIFEST.croc) {
+      const b = billboard('croc', 1.0);
+      g.add(b);
+      g.userData.sprite = b;
+    } else {
+      const bodyM = colMat(0x4e9440);
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.36, 1.9), bodyM);
+      body.position.y = 0.18;
+      g.add(body);
+      const snout = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.24, 0.9), bodyM);
+      snout.position.set(0, 0.12, 1.3);
+      g.add(snout);
+      for (const s of [-1, 1]) {
+        const eW = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+        eW.position.set(s * 0.3, 0.44, 0.85);
+        g.add(eW);
+        const eP = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 5), new THREE.MeshBasicMaterial({ color: 0x201510 }));
+        eP.position.set(s * 0.3, 0.46, 0.94);
+        g.add(eP);
+      }
+      g.userData.sprite = body;
+    }
+    return g;
+  };
+  /* river: low branch across the water — duck/dive under it */
+  TPL.branch = () => {
+    const g = new THREE.Group();
+    const t = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.34, 7.4, 10),
+      tintable(new THREE.MeshBasicMaterial({ map: barkTex })));
+    t.rotation.z = Math.PI / 2; t.position.y = 1.8;
+    g.add(t);
+    const leafM = colMat(0x5aa044);
+    for (const s of [-2.6, -0.4, 1.8]) {
+      const tuft = new THREE.Mesh(new THREE.SphereGeometry(0.5, 8, 6), leafM);
+      tuft.position.set(s, 2.15, 0);
+      tuft.scale.y = 0.65;
+      g.add(tuft);
+    }
+    g.userData.sprite = t;
+    return g;
+  };
   /* stone gate marking the cave mouth (decor — no collision) */
   TPL.gate = (dark) => {
     const g = new THREE.Group();
@@ -843,13 +1166,16 @@ function buildTemplates() {
 /* rules: what saves you from each obstacle */
 const RULE = { rock: 'jump', stalagmite: 'jump', log: 'jump', snake: 'jump', puddle: 'jump',
   trex: 'slide', stalactite: 'slide', 'stone-gate': 'slide', siderock: 'slide',
-  boulder: 'block', bush: 'block', raptor: 'block', 'stone-block': 'block', ptero: 'block', rollrock: 'block', canopy: 'block' };
+  boulder: 'block', bush: 'block', raptor: 'block', 'stone-block': 'block', ptero: 'block', rollrock: 'block', canopy: 'block',
+  storm: 'block', fallrock: 'jump', shark: 'block', croc: 'jump', branch: 'slide' };
 
 /* ------------------------- player ------------------------- */
 const P = { g: new THREE.Group(), states: {}, shadow: null, cur: null };
 function buildPlayer() {
   const defs = { 'ruly-fly': 2.5 };
   if (window.MANIFEST['ruly-hurt']) defs['ruly-hurt'] = 2.25;
+  if (window.MANIFEST['ruly-scared']) defs['ruly-scared'] = 2.25;   // glancing back at the chaser
+  if (window.MANIFEST['ruly-mosa']) defs['ruly-mosa'] = 2.3;        // riding the mosasaurus
   for (const d of Object.values(DINOS))                   // every available mount pose
     for (const [pose, name] of Object.entries(d.sprites))
       if (window.MANIFEST[name]) defs[name] = pose === 'slide' ? 1.75 : 2.25;
@@ -917,6 +1243,23 @@ function buildPlants() {
     scene.add(g);
     plants.push(g);
   }
+  /* far bank of the river: ferns + little sandy islets */
+  for (let i = 0; i < 8; i++) {
+    const g = TPL['fern' + (1 + (i % 3))]();
+    vary(g);
+    const h = 1.6 + Math.random() * 1.6;
+    g.scale.set(h, h, h);
+    g.position.set(RIVER_OFF * LANE_X + 4.8 + Math.random() * 2.6, 0, -(i / 8) * VIEW);
+    riverG.add(g);
+    riverDeco.push(g);
+  }
+  for (let i = 0; i < 4; i++) {
+    const isle = new THREE.Mesh(new THREE.CircleGeometry(0.9 + Math.random() * 0.7, 18), colMat(0xe8c98a));
+    isle.rotation.x = -Math.PI / 2;
+    isle.position.set(RIVER_OFF * LANE_X + 3.0 + Math.random() * 1.6, 0.03, -12 - (i / 4) * VIEW);  // hug the far bank — decor, not an obstacle
+    riverG.add(isle);
+    riverDeco.push(isle);
+  }
   if (window.MANIFEST.mushrooms) {                        // glowing mushrooms — all shapes and sizes
     for (let i = 0; i < 18; i++) {
       const g = TPL.mushrooms();
@@ -943,7 +1286,8 @@ function buildPlants() {
 /* ------------------------- entities ------------------------- */
 function addEnt(kind, lane, z, baseY) {
   const obj = TPL[kind]();
-  obj.position.set(lane * LANE_X, 0, -z);
+  const off = S.water ? RIVER_OFF : 0;                   // river entities live beside the track
+  obj.position.set((lane + off) * LANE_X, 0, -z);
   if (kind === 'ptero') {                                // each pterodactyl its own color and size
     vary(obj);
     const sc = 0.85 + Math.random() * 0.5;
@@ -954,8 +1298,8 @@ function addEnt(kind, lane, z, baseY) {
       o.material.color.copy(curTint).multiplyScalar(curFlick).multiply(o.material.userData.baseTint);
   });
   scene.add(obj);
-  S.ents.push({ kind, lane, z, dead: false, obj, ph: Math.random() * 6, baseY: baseY || 0,
-    allLanes: kind === 'log' });
+  S.ents.push({ kind, lane, z, off, water: S.water, dead: false, obj, ph: Math.random() * 6, baseY: baseY || 0,
+    allLanes: kind === 'log' || kind === 'branch' });
 }
 function addGate(z, dark) {
   const obj = TPL.gate(dark);
@@ -979,6 +1323,29 @@ function spawnAhead() {
   while (S.nextZ < VIEW + 10) {
     const r = Math.random();
     const lane = [-1, 0, 1][(Math.random() * 3) | 0];
+    if (S.water) {                                       // river run: its own obstacle mix, egg-rich
+      const rw = Math.random();
+      if (rw < 0.34) {
+        for (let i = 0; i < 5; i++) addEnt('egg', lane, S.nextZ + i * 2.6);
+        S.nextZ += 5 * 2.6 + 8 + Math.random() * 4;
+      } else if (rw < 0.5) {
+        addEnt('shark', lane, S.nextZ);
+        S.nextZ += 16 + Math.random() * 6;
+      } else if (rw < 0.66) {
+        addEnt('croc', lane, S.nextZ);
+        S.nextZ += 15 + Math.random() * 6;
+      } else if (rw < 0.8) {
+        addEnt('rock', lane, S.nextZ);
+        S.nextZ += 14 + Math.random() * 5;
+      } else if (rw < 0.9) {
+        addEnt('log', 0, S.nextZ);
+        S.nextZ += 17 + Math.random() * 6;
+      } else {
+        addEnt('branch', 0, S.nextZ);
+        S.nextZ += 17 + Math.random() * 6;
+      }
+      continue;
+    }
     if (isGround() && S.dist - S.lastCoin > COIN_GAP && r < 0.14) {
       addEnt('coin', lane, S.nextZ);
       S.lastCoin = S.dist;
@@ -1010,6 +1377,18 @@ function spawnAhead() {
       } else if (isGround() && farFromGate && rr < 0.46) { // incoming boulder!
         addEnt('rollrock', lane, S.nextZ + 34);
         S.nextZ += 16 + Math.random() * 8;
+      } else if (S.stage === 'fly' && rr < 0.22) {         // golden ring trail — fly through!
+        for (let i = 0; i < 3; i++) addEnt('ring', lane, S.nextZ + i * 7, 0.9);
+        S.nextZ += 3 * 7 + 12;
+      } else if (S.stage === 'fly' && rr < 0.36) {         // storm cloud, flashing lightning
+        addEnt('storm', lane, S.nextZ);
+        S.nextZ += 17 + Math.random() * 6;
+      } else if (S.stage === 'fly' && rr < 0.5) {          // pterosaur wave — find the gaps
+        for (let i = 0; i < 3; i++) {
+          const open = [-1, 0, 1][(Math.random() * 3) | 0];
+          for (const l of [-1, 0, 1]) if (l !== open) addEnt('ptero', l, S.nextZ + i * 10);
+        }
+        S.nextZ += 3 * 10 + 14;
       } else {
         const tbl = SPAWN_TABLE[S.stage];
         const kind = tbl[(Math.random() * tbl.length) | 0];
@@ -1058,6 +1437,12 @@ function setStage(name) {
   wallG.visible = name === 'cave';
   cloudG.visible = name === 'fly';
   fireflyG.visible = name === 'night';
+  pollenG.visible = rayG.visible = name === 'jungle';
+  crystalG.visible = name === 'cave';
+  star.material.opacity = 0; starT = -1;
+  riverG.visible = false;
+  clearWeather();
+  windT = -1; windNext = 8; windEl.style.opacity = '0';
   for (const p of plants) p.visible = name === 'jungle' || name === 'night';
   for (const p of cavePlants) p.visible = name === 'cave';
   pathMat.map = name === 'cave' ? stoneTex : sandTex; pathMat.needsUpdate = true;
@@ -1096,6 +1481,7 @@ function scheduleStages() {
     addGate(S.caveEndAt - S.dist, false);
   }
   if (isGround() && S.dist > S.nextCaveAt) {
+    if (S.water || swingT >= 0) { S.nextCaveAt = S.dist + 80; return; }   // finish the river first
     transitionTo('cave', () => { S.caveEndAt = S.dist + CAVE_LEN; });
   } else if (S.stage === 'cave' && S.dist > S.caveEndAt) {
     /* day and night alternate between caves */
@@ -1119,13 +1505,17 @@ function reset() {
     transitioning: false, jumpCount: 0, spin: false, gateIn: -1, gateOut: -1, hurtT: 0,
     groundStage: 'jungle', magnetT: 0, shield: false, lastPwr: 0, boostT: 0, chaseT: 0,
     onTop: false, groundY: 0, shieldT: 0, rollT: -1, rollDir: 1, superJ: false,
-    startTotal: getTotal() });
+    startTotal: getTotal(), water: false });
   scorePill.style.display = 'none';
   P.bubble.visible = false;
   if (P.magnet) P.magnet.visible = false;
   if (P.boost) P.boost.visible = false;
   chaser.visible = false;
   boostFx.style.opacity = '0';
+  volcanoT = 0; volcanoAt = 520 + Math.random() * 220; volcanoFx.style.opacity = '0';
+  swingT = -1; camW = 0;
+  riverAt = 260 + Math.random() * 120; riverEnd = 0; riverVineDone = false;
+  catchFx.style.display = 'none';
   setStage('jungle');
   /* debug hooks for testing stages */
   const h = location.hash;
@@ -1143,6 +1533,11 @@ function reset() {
   if (h.includes('wall')) { addEnt('rock', -1, 30); addEnt('boulder', 0, 30); addEnt('bush', 1, 30); }
   if (h.includes('roll')) addEnt('rollrock', 0, 45);
   if (h.includes('chest') && window.MANIFEST.chest) addEnt('chest', 0, 20);
+  if (h.includes('volcano')) volcanoAt = 50;
+  if (h.includes('river')) riverAt = 50;
+  if (h.includes('water')) { S.water = true; riverEnd = 1e9; S.nextCaveAt = 1e9; }   // straight into the swim
+  if (h.includes('chase')) S.chaseT = 1e9;                // first stumble = caught (for testing)
+  if (h.includes('storm')) { setStage('fly'); S.flyUntil = 1e9; addEnt('storm', 0, 30); addEnt('ring', 0, 50, 0.9); }
   const dm = h.match(/dino=(\w+)/);
   if (dm && DINOS[dm[1]]) curDino = dm[1];
   syncHud();
@@ -1151,10 +1546,31 @@ function reset() {
 playBtn.addEventListener('click', () => {
   initAudio();
   if (AC && AC.state === 'suspended') AC.resume();
+  setTimeout(() => play('letsgo', 1), 350);               // "lets go!" as the run kicks off
+  if (location.hash.includes('sndtest')) {                // audio check: all recordings, one by one
+    Object.keys(window.SOUNDS || {}).forEach((n, i) => {
+      setTimeout(() => { console.log('sndtest:', n); play(n, 1); }, 1200 + i * 1800);
+    });
+  }
   reset();
   overlay.classList.add('hide');
   overlay.classList.remove('over');
 });
+/* stumble twice while the T-Rex is on your tail — and it catches you! */
+function caught() {
+  if (S.over || !S.running) return;
+  S.running = false;
+  S.hearts = 0; syncHud();
+  S.chaseT = 0; chaser.visible = false;
+  hurtEl.style.opacity = '1';
+  setTimeout(() => { hurtEl.style.opacity = '0'; }, 500);
+  catchFx.innerHTML = window.ASSETS['trex-catch']
+    ? `<img src="${window.ASSETS['trex-catch']}" alt="">`
+    : '<div class="emoji">🦖</div>';
+  catchFx.style.display = 'flex';
+  sndHit();
+  setTimeout(() => { catchFx.style.display = 'none'; gameOver(); }, 1150);
+}
 function gameOver() {
   S.over = true; S.running = false;
   stopMusic(); sndOver();
@@ -1242,6 +1658,10 @@ function update(dt) {
     for (const p of cavePlants) { p.position.z += mv; if (p.position.z > 8) p.position.z -= VIEW + 6; }
     for (const f of fireflies) { f.position.z += mv; if (f.position.z > 6) f.position.z -= VIEW + 4; }
     for (const c of flyClouds) { c.position.z += mv * 1.15; if (c.position.z > 8) { c.position.z -= VIEW + 8; c.position.x = (Math.random() * 2 - 1) * 7; } }
+    for (const c of crystals) { c.position.z += mv; if (c.position.z > 6) c.position.z -= VIEW + 4; }
+    for (const p of riverDeco) { p.position.z += mv; if (p.position.z > 8) p.position.z -= VIEW + 10; }
+    for (const m of pollenG.children) { m.position.z += mv; if (m.position.z > 6) m.position.z -= VIEW + 4; }
+    if (riverG.visible) waterTex.offset.y += mv / 32;
     S.nextZ -= mv;
     for (const en of S.ents) {
       en.z -= mv;
@@ -1252,8 +1672,24 @@ function update(dt) {
       }
       if (en.kind === 'snake') {                           // slithers from side to side
         en.lane = Math.sin(S.t * 1.6 + en.ph) * 1.15;
-        en.obj.position.x = en.lane * LANE_X;
+        en.obj.position.x = (en.lane + en.off) * LANE_X;
         en.obj.scale.x = Math.cos(S.t * 1.6 + en.ph) >= 0 ? 1 : -1;
+      }
+      if (en.kind === 'shark') {                           // cruises across the river
+        en.lane = Math.sin(S.t * 1.1 + en.ph) * 1.0;
+        en.obj.position.x = (en.lane + en.off) * LANE_X;
+      }
+      if (en.kind === 'fallrock' && en.fallY > 0) {        // volcano boulder plummeting
+        en.fallY = Math.max(0, en.fallY - 10.5 * dt);
+        en.obj.userData.ball.position.y = 0.78 + en.fallY;
+        const r = en.obj.userData.ring;
+        if (r) { const rs = 1 + en.fallY * 0.08; r.scale.set(rs, rs, 1); r.material.opacity = 0.25 + 0.5 * (1 - en.fallY / 13); }
+        if (en.fallY === 0 && !en.landed) {
+          en.landed = true;
+          S.shake = Math.max(S.shake, 0.22);
+          tone(90, 40, 0.25, 'square', 0.2);
+          if (r) r.material.opacity = 0;
+        }
       }
       en.obj.position.z = -en.z;
     }
@@ -1272,7 +1708,7 @@ function update(dt) {
     } else if (under && S.jumpT >= 0 && S.jumpT > 0.45) { // came down on the blocks — ride them!
       S.onTop = true; S.jumpT = -1; S.spin = false;
       S.groundY = 1.55;
-      sndSlide();
+      sndLand();
     }
     const gTarget = S.onTop ? 1.55 : 0;
     S.groundY += (gTarget - S.groundY) * Math.min(1, dt * 9);
@@ -1286,7 +1722,9 @@ function update(dt) {
       const hurtSprite = S.hurtT > 0 && !flying ? spriteFor('hurt') : null;
       const front = spriteFor('front');
       if (flying) showPlayer('ruly-fly');
+      else if (S.water && window.MANIFEST['ruly-mosa']) showPlayer('ruly-mosa');
       else if (hurtSprite && S.jumpT < 0) showPlayer(hurtSprite);
+      else if (S.chaseT > 0 && window.MANIFEST['ruly-scared'] && S.jumpT < 0 && !slide) showPlayer('ruly-scared');
       else if (S.jumpT >= 0) {
         /* spin jump: show the face sprite mid-turn when available */
         if (S.spin && front && S.jumpT > 0.3 && S.jumpT < 0.7) showPlayer(front);
@@ -1295,13 +1733,39 @@ function update(dt) {
       else if (slide) showPlayer(spriteFor('slide'));
       else showPlayer(spriteFor(STAGE_CFG[S.stage].player));
     }
-    P.g.position.x = S.laneF * LANE_X;
-    const bob = flying ? 0.9 + Math.sin(S.t * 3) * 0.25 : Math.abs(Math.sin(S.t * 10)) * 0.07;
-    P.g.position.y = jump * (S.superJ ? 3.1 : S.spin ? 2.6 : 2.1) + bob + S.groundY;
+    P.g.position.x = (S.laneF + (S.water ? RIVER_OFF : 0)) * LANE_X;
+    const bob = flying ? 0.9 + Math.sin(S.t * 3) * 0.25
+      : S.water ? 0.12 + Math.sin(S.t * 4) * 0.1
+      : Math.abs(Math.sin(S.t * 10)) * 0.07;
+    P.g.position.y = S.water
+      ? jump * 1.9 + bob - (slide ? 0.55 : 0)             // dolphin leap / dive under
+      : jump * (S.superJ ? 3.1 : S.spin ? 2.6 : 2.1) + bob + S.groundY;
     P.g.rotation.z = S.rollT >= 0 ? -S.rollDir * Math.PI * 2 * S.rollT : (S.lane - S.laneF) * 0.3;
     P.g.rotation.y = (S.spin && S.jumpT >= 0) ? S.jumpT * Math.PI * 2 : 0;
+    /* Tarzan swing to/from the river overrides the ride pose */
+    if (swingT >= 0) {
+      swingT += dt / 0.85;
+      const k = Math.min(1, swingT);
+      const ease = k * k * (3 - 2 * k);
+      const x0 = swingDir > 0 ? S.swingFromX : RIVER_OFF * LANE_X;
+      const x1 = swingDir > 0 ? RIVER_OFF * LANE_X : 0;
+      P.g.position.x = x0 + (x1 - x0) * ease;
+      P.g.position.y = Math.sin(k * Math.PI) * 3.4 + 0.2;
+      P.g.rotation.z = -Math.sin(k * Math.PI) * 0.65 * swingDir;
+      showPlayer(spriteFor('jump'));
+      if (swingT >= 1) {
+        swingT = -1;
+        S.lane = 0; S.laneF = 0; S.laneFrom = 0; S.laneT = 1;
+        if (swingDir > 0) { S.water = true; play('cool', 1); }
+        else {
+          S.water = false;
+          riverAt = S.dist + 300 + Math.random() * 160;
+          riverVineDone = false;
+        }
+      }
+    }
     P.shadow.position.y = S.groundY + 0.02 - P.g.position.y;
-    P.shadow.material.opacity = flying ? 0 : 0.22 - jump * 0.1;
+    P.shadow.material.opacity = flying ? 0 : S.water ? 0.1 : 0.22 - jump * 0.1;
     const shSc = 1 - jump * 0.3;
     P.shadow.scale.set(shSc, shSc, shSc);
     P.g.visible = !(S.invuln > 0 && ((S.invuln * 8) | 0) % 2 === 0);
@@ -1311,8 +1775,9 @@ function update(dt) {
       S.magnetT -= dt;
       for (const en of S.ents) {
         if ((en.kind !== 'egg' && en.kind !== 'egg-speed') || en.dead || en.z > 14 || en.z < -1) continue;
+        if (!!en.water !== !!S.water) continue;           // don't pull eggs across the river bank
         en.lane += (S.laneF - en.lane) * Math.min(1, dt * 7);
-        en.obj.position.x = en.lane * LANE_X;
+        en.obj.position.x = (en.lane + en.off) * LANE_X;
       }
     }
     if (P.magnet) {
@@ -1350,6 +1815,167 @@ function update(dt) {
       chaser.rotation.z = Math.sin(S.t * 9) * 0.08;        // galloping sway
       if (S.chaseT <= 0) chaser.visible = false;
     }
+
+    /* ---------------- river beside the track + Tarzan entry ---------------- */
+    if (S.stage === 'jungle' && !S.water && swingT < 0 && !riverVineDone && S.dist + VIEW > riverAt) {
+      if (riverAt + 240 > S.nextCaveAt) {                  // too close to the cave — after it, then
+        riverAt = S.nextCaveAt + CAVE_LEN + 90;
+      } else {
+        riverVineDone = true;
+        riverEnd = riverAt + 190;
+        addEnt('vine', 1, riverAt - S.dist);
+      }
+    }
+    riverG.visible = S.stage === 'jungle' &&
+      (S.water || swingT >= 0 || (riverVineDone && S.dist > riverAt - 70 && S.dist < riverEnd + 30));
+    if (!S.water && swingT < 0 && riverVineDone && S.dist > riverAt + 25) {   // vine missed — try again later
+      riverVineDone = false;
+      riverAt = S.dist + 300 + Math.random() * 160;
+    }
+    if (!S.water && swingT < 0 && S.jumpT >= 0 && S.stage === 'jungle') {     // jump into the vine!
+      for (const en of S.ents) {
+        if (en.kind !== 'vine' || en.used) continue;
+        if (en.z < 2.4 && en.z > -0.6 && Math.abs(S.laneF - en.lane) < 0.8) {
+          en.used = true;
+          S.swingFromX = P.g.position.x;
+          swingT = 0; swingDir = 1;
+          S.jumpT = -1; S.spin = false; S.superJ = false;
+          if (!play('yay', 1)) sndWhoosh();
+        }
+      }
+    }
+    if (S.water && swingT < 0 && S.dist > riverEnd) {       // river's end — leap back to the path
+      swingT = 0; swingDir = -1;
+      S.jumpT = -1; S.slideT = -1;
+      sndWhoosh();
+    }
+
+    /* ---------------- volcano eruption (rare, ground stages) ---------------- */
+    if (isGround() && !S.water && swingT < 0 && !S.transitioning &&
+        volcanoT <= 0 && S.dist > volcanoAt) {
+      volcanoT = 12;
+      volcanoRockT = 1.4;                                  // grace: the warning comes first
+      volcanoAt = S.dist + 650 + Math.random() * 350;
+    }
+    if (volcanoT > 0) {
+      volcanoT -= dt;
+      const erupting = volcanoT < 10;                      // first 2s = rumbling warning
+      S.shake = Math.max(S.shake, erupting ? 0.2 : 0.13);
+      volcanoFx.style.opacity = erupting ? '1' : '0.55';
+      if (isGround()) {
+        const cfg = STAGE_CFG[S.stage];
+        const k = erupting ? 0.55 : 0.3;
+        tmpC.set(cfg.tint).lerp(LAVA, k); applyTint(tmpC.getHex());
+        tmpC.set(cfg.sky).lerp(LAVA, k * 0.8); scene.background.copy(tmpC);
+        tmpC.set(cfg.fog).lerp(LAVA, k * 0.8); scene.fog.color.copy(tmpC);
+      }
+      if (erupting && isGround() && !S.transitioning && !S.water) {
+        volcanoRockT -= dt;
+        if (volcanoRockT <= 0) {
+          volcanoRockT = 0.9 + Math.random() * 0.5;
+          addEnt('fallrock', [-1, 0, 1][(Math.random() * 3) | 0], 12 + Math.random() * 16);
+          S.ents[S.ents.length - 1].fallY = 13;
+        }
+      }
+      if (volcanoT <= 0) {                                 // survived! colors return + a thank-you bonus
+        const cfg = STAGE_CFG[S.stage];
+        applyTint(cfg.tint);
+        scene.background.set(cfg.sky); scene.fog.color.set(cfg.fog);
+        volcanoFx.style.opacity = '0';
+        S.eggs += 5; addTotal(5); syncHud();
+        if (!play('yay', 1)) sndPwr();
+      }
+    }
+
+    /* ---------------- fly stage: wind gusts ---------------- */
+    if (S.stage === 'fly' && !S.transitioning) {
+      windNext -= dt;
+      if (windNext <= 0 && windT < 0) {
+        windT = 1.0; windPushed = false;
+        windDir = Math.random() < 0.5 ? -1 : 1;
+        if ((S.lane === 1 && windDir === 1) || (S.lane === -1 && windDir === -1)) windDir *= -1;
+        windNext = 7 + Math.random() * 5;
+        windEl.textContent = windDir > 0 ? '💨👉' : '👈💨';
+        windEl.style.opacity = '1';
+      }
+      if (windT >= 0) {
+        windT -= dt;
+        if (windT <= 0.5 && !windPushed) {                 // the gust hits — shoved a lane over!
+          windPushed = true;
+          S.laneFrom = S.laneF;
+          S.lane = Math.max(-1, Math.min(1, S.lane + windDir));
+          S.laneT = 0;
+          sndWhoosh();
+        }
+        if (windT <= 0) windEl.style.opacity = '0';
+      }
+    }
+
+    /* ---------------- weather (jungle) ---------------- */
+    if (S.stage === 'jungle' && !S.transitioning) {
+      WX.t += dt;
+      if (WX.mode === 'clear' && WX.t > WX.next) {
+        WX.mode = Math.random() < 0.55 ? 'rain' : 'wind';
+        WX.t = 0;
+        rainG.visible = WX.mode === 'rain';
+        leafG.visible = WX.mode === 'wind';
+        if (WX.mode === 'rain') applyTint(0xaebed2);       // clouds roll in
+      } else if (WX.mode === 'rain') {
+        for (const d of rains) {
+          d.position.y -= 21 * dt;
+          if (d.position.y < 0) { d.position.y = 8 + Math.random() * 3; d.position.x = Math.random() * 26 - 8; }
+        }
+        if (WX.t > 9) {                                    // sun's back — rainbow time
+          WX.mode = 'rainbow'; WX.t = 0;
+          rainG.visible = false;
+          if (volcanoT <= 0) applyTint(STAGE_CFG.jungle.tint);
+        }
+      } else if (WX.mode === 'rainbow') {
+        rainbow.material.opacity = WX.t < 1 ? WX.t * 0.85 : WX.t > 7 ? Math.max(0, (8 - WX.t)) * 0.85 : 0.85;
+        if (WX.t > 8) clearWeather();
+      } else if (WX.mode === 'wind') {
+        for (const lf of leaves) {
+          lf.position.x += lf.userData.sp * dt;
+          lf.position.y += Math.sin(S.t * 5 + lf.userData.ph) * dt * 1.2;
+          lf.rotation.x += dt * 6; lf.rotation.y += dt * 4;
+          if (lf.position.x > 12) { lf.position.x = -11; lf.position.z = -Math.random() * 50; }
+        }
+        for (const p of plants) p.rotation.z = Math.sin(S.t * 3 + p.position.z) * 0.07;
+        if (WX.t > 11) clearWeather();
+      }
+    }
+
+    /* ---------------- ambience animation ---------------- */
+    if (S.stage === 'jungle') {
+      for (const m of pollenG.children) {
+        const u = m.userData;
+        if (u.bx === undefined) continue;
+        m.position.x = u.bx + Math.sin(S.t * 0.6 + u.ph) * 0.5;
+        m.position.y = u.by + Math.sin(S.t * 0.9 + u.ph * 2) * 0.35;
+      }
+      for (const b of butterflies) {
+        b.children[0].rotation.y =  Math.sin(S.t * 14 + b.userData.ph) * 0.9;
+        b.children[1].rotation.y = -Math.sin(S.t * 14 + b.userData.ph) * 0.9;
+      }
+      for (const rMesh of rayG.children) rMesh.material.opacity = 0.24 + Math.sin(S.t * 0.7) * 0.08;
+    }
+    if (S.stage === 'cave') for (const c of crystals) {
+      const tw = 0.8 + Math.sin(S.t * 4 + c.userData.ph) * 0.3;
+      c.userData.halo.scale.set(tw, tw, 1);
+    }
+    if (S.stage === 'night') {                             // a wish upon a shooting star
+      if (starT < 0) {
+        starNext -= dt;
+        if (starNext <= 0) { starT = 0; starNext = 7 + Math.random() * 9; }
+      } else {
+        starT += dt / 1.3;
+        star.position.x = -34 + starT * 66;
+        star.position.y = 34 - starT * 9;
+        star.material.opacity = Math.sin(Math.min(1, starT) * Math.PI) * 0.9;
+        if (starT >= 1) { starT = -1; star.material.opacity = 0; }
+      }
+    }
+
     /* fireflies drift */
     if (S.stage === 'night') for (const f of fireflies) {
       const u = f.userData;
@@ -1367,6 +1993,17 @@ function update(dt) {
       } else if (en.kind === 'ptero') {
         en.obj.userData.sprite.position.y = 0.9 + Math.sin(S.t * 7 + en.ph) * 0.18;
         en.obj.userData.sprite.scale.y = 1 + Math.sin(S.t * 11 + en.ph) * 0.12;
+      } else if (en.kind === 'ring') {
+        en.obj.rotation.z = Math.sin(S.t * 3 + en.ph) * 0.25;
+        const p = 1 + Math.sin(S.t * 6 + en.ph) * 0.07;
+        en.obj.scale.set(p, p, 1);
+      } else if (en.kind === 'storm') {
+        en.obj.userData.bolt.material.opacity = Math.pow(Math.max(0, Math.sin(S.t * 6 + en.ph)), 8);
+        en.obj.userData.sprite.position.y = 1.35 + Math.sin(S.t * 2.5 + en.ph) * 0.1;
+      } else if (en.kind === 'vine') {
+        en.obj.rotation.z = Math.sin(S.t * 1.4 + en.ph) * 0.08;   // gentle sway — come grab me!
+      } else if (en.kind === 'croc') {
+        en.obj.position.y = Math.sin(S.t * 3 + en.ph) * 0.06;
       }
     }
 
@@ -1374,15 +2011,22 @@ function update(dt) {
     const jumpHigh = S.jumpT >= 0 && S.jumpT > 0.18 && S.jumpT < 0.82;
     const sliding  = S.slideT >= 0;
     for (const en of S.ents) {
-      if (en.dead) continue;
-      const isPickup = ['egg', 'egg-speed', 'coin', 'magnet', 'bubble', 'chest'].includes(en.kind);
+      if (en.dead || swingT >= 0) continue;                // mid-swing: airborne over everything
+      if (!!en.water !== !!S.water) continue;              // land vs river — parallel worlds
+      if (en.kind === 'vine') continue;                    // handled by the grab check
+      if (en.kind === 'fallrock' && en.fallY > 1.4) continue;   // still in the air above you
+      const isPickup = ['egg', 'egg-speed', 'coin', 'magnet', 'bubble', 'chest', 'ring'].includes(en.kind);
       const near = isPickup ? (en.z < 1.6 && en.z > -0.8) : (en.z < 1.0 && en.z > -1.0);
       if (!near || (!en.allLanes && Math.abs(S.laneF - en.lane) > 0.55)) continue;
       if (isPickup) {
         if (Math.abs(P.g.position.y - en.baseY) > 1.15) continue;   // must actually reach its height
         en.dead = true; en.gone = true;
-        if (en.kind === 'egg') { S.eggs++; addTotal(1); syncHud(); sndEgg(); }
+        if (en.kind === 'egg') {
+          S.eggs++; addTotal(1); syncHud(); sndEgg();
+          if (S.eggs % 8 === 0) play('cool', 1);         // little cheer every egg streak
+        }
         else if (en.kind === 'egg-speed') { S.eggs++; addTotal(1); S.boostT = 6; syncHud(); play('cool', 1); sndPwr(); }
+        else if (en.kind === 'ring') { S.eggs += 3; addTotal(3); syncHud(); sndPwr(); }
         else if (en.kind === 'magnet') { S.magnetT = 8; sndPwr(); }
         else if (en.kind === 'bubble') { S.shield = true; S.shieldT = SHIELD_TIME; P.bubble.visible = true; sndPwr(); }
         else if (en.kind === 'chest') {                  // surprise! + a celebratory spin jump
@@ -1402,19 +2046,14 @@ function update(dt) {
         /* a super jump (double-up) clears even the rolling boulder */
         if (en.kind === 'rollrock' && S.superJ && jumpHigh) continue;
         const safe = (rule === 'jump' && jumpHigh) || (rule === 'slide' && sliding);
-        if (safe) {
-          if (rule === 'slide' && !en.cheered && S.t - lastCheer > 5) {   // nailed the slide!
-            en.cheered = true; lastCheer = S.t;
-            play('successslide', 1);
-          }
-          continue;
-        }
+        if (safe) continue;                              // (slide cheer now plays on the crouch itself)
         if (S.invuln > 0 || S.boostT > 0 || S.transitioning) continue;
         if (S.shield) {                                  // the bubble takes the hit
           S.shield = false; P.bubble.visible = false;
           en.dead = true; S.invuln = 1.2; sndPop();
           continue;
         }
+        if (S.chaseT > 0) { en.dead = true; caught(); break; }   // second stumble mid-chase — gotcha!
         en.dead = true; S.hearts--; S.invuln = 1.6; S.shake = 0.38; S.hurtT = 0.7; S.chaseT = 5; sndHit();
         /* clear hit feedback: red vignette + breaking heart */
         hurtEl.style.opacity = '1';
@@ -1445,11 +2084,14 @@ function update(dt) {
       flyFill.style.width = Math.max(0, ((S.flyUntil - S.t) / FLY_TIME) * 100) + '%';
     }
 
-    /* camera */
+    /* camera (drifts over the river while swimming) */
+    const camTarget = swingT >= 0 ? (swingDir > 0 ? 1 : 0) : (S.water ? 1 : 0);
+    camW += (camTarget - camW) * Math.min(1, dt * 2.2);
+    const camOff = camW * RIVER_OFF * LANE_X;
     const jitter = S.shake > 0 ? S.shake : 0;
-    camera.position.x = S.laneF * LANE_X * 0.45 + (jitter ? (Math.random() - 0.5) * jitter * 0.5 : 0);
+    camera.position.x = camOff + S.laneF * LANE_X * 0.45 + (jitter ? (Math.random() - 0.5) * jitter * 0.5 : 0);
     camera.position.y = (S.stage === 'fly' ? 4.9 : 4.3) + jump * 0.5 + (jitter ? (Math.random() - 0.5) * jitter * 0.4 : 0);
-    camera.lookAt(S.laneF * LANE_X * 0.6, 1.4, -9);
+    camera.lookAt(camOff + S.laneF * LANE_X * 0.6, 1.4, -9);
   }
   renderer.render(scene, camera);
 }
@@ -1465,6 +2107,31 @@ function frame(now) {
 }
 const totalM = location.hash.match(/settotal=(\d+)/);    // parent hook: restore progress on a new device
 if (totalM) { try { localStorage.setItem('ruly-total', +totalM[1]); } catch (e) {} }
+/* optional intro video: dist ships intro.mp4 beside index.html; tap skips (absent = straight to menu) */
+(function introVideo() {
+  if (location.protocol === 'file:' || location.hash.includes('auto') || location.hash.includes('nointro')) return;
+  fetch('intro.mp4', { method: 'HEAD' }).then(r => {
+    if (!r.ok || !(r.headers.get('content-type') || '').includes('video')) return;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:20;background:#000;display:flex;align-items:center;justify-content:center';
+    const v = document.createElement('video');
+    v.src = 'intro.mp4'; v.muted = true; v.autoplay = true; v.playsInline = true;
+    v.setAttribute('playsinline', '');
+    v.style.cssText = 'width:100%;height:100%;object-fit:contain';
+    const skip = document.createElement('div');
+    skip.textContent = '⏭️';
+    skip.style.cssText = 'position:absolute;bottom:22px;right:22px;font-size:44px;filter:drop-shadow(0 3px 5px rgba(0,0,0,.6))';
+    let done = false;
+    const end = () => { if (done) return; done = true; wrap.remove(); };
+    v.addEventListener('ended', end);
+    v.addEventListener('error', end);
+    wrap.addEventListener('pointerdown', end);
+    setTimeout(end, 20000);                               // never trap the player
+    wrap.appendChild(v); wrap.appendChild(skip);
+    document.body.appendChild(wrap);
+    v.play().catch(end);
+  }).catch(() => {});
+})();
 loadTextures(() => {
   buildTemplates();
   buildPlayer();
