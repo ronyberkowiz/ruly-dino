@@ -619,6 +619,10 @@ function resize() {
   if (hfov > HFOV_CAP) vfov = 2 * Math.atan(Math.tan(HFOV_CAP / 2) / aspect);
   camera.fov = vfov * 180 / Math.PI;
   camera.updateProjectionMatrix();
+  /* re-fit the backdrop for the new orientation (portrait<->landscape). try/catch: the very first resize()
+     runs during module load, BEFORE fitBg's const/let (curBg/BG_FIT/LAND_DROP) are initialized (TDZ) — that
+     first call safely no-ops; every real resize/rotate afterwards fits correctly. */
+  try { fitBg(); } catch (e) {}
 }
 window.addEventListener('resize', resize);
 resize();
@@ -2287,19 +2291,33 @@ const nightFly = () => S.stage === 'fly' && S.groundStage === 'night' && !!windo
    sky) than the day bg-jungle, so at the shared bgW they read as zoomed. A smaller bgW zooms them OUT to
    match the day (bgW smaller = more of the image shown). bgY nudged so the smaller plane still meets the horizon. */
 const BG_FIT = {
-  'bg-jungle-rain': { bgW: 172, bgY: 34 },
-  'bg-night': { bgW: 176, bgY: 36 },
-  'bg-volcano': { bgW: 178, bgY: 36 },
+  'bg-jungle-rain': { bgW: 178 },
+  'bg-night': { bgW: 182 },
+  'bg-volcano': { bgW: 184 },
 };
+const LAND_DROP = 30;                                     // how far to drop the vista backdrops in landscape (see fitBg)
+let curBg = null;
 function setBg(bgName) {
   const cfg = STAGE_CFG[S.stage];
   if (!TEX[bgName]) bgName = cfg.bg;
   bgMat.map = TEX[bgName]; bgMat.needsUpdate = true;
-  const mf = window.MANIFEST[bgName];                     // fit plane to image aspect + stage size
-  const ov = BG_FIT[bgName] || {};
+  curBg = bgName;
+  fitBg();
+}
+/* size + position the backdrop plane. Orientation-aware: a landscape phone has a SHORT vertical field, so
+   at the portrait bgY only the painting's near foreground fills it and the distant vista (horizon/sky) is
+   cropped off the top — reading as "zoomed in". On the ground stages we drop the plane in landscape so the
+   wide, more-distant vista shows instead. Called from setBg and on every resize/rotate. */
+function fitBg() {
+  if (!curBg) return;
+  const cfg = STAGE_CFG[S.stage];
+  const mf = window.MANIFEST[curBg]; if (!mf) return;
+  const ov = BG_FIT[curBg] || {};
   const s = (ov.bgW || cfg.bgW) / 260;
   bgMesh.scale.set(s * (mf.w / mf.h) / (260 / 146), s, 1);
-  bgMesh.position.y = ov.bgY != null ? ov.bgY : cfg.bgY;  // authority for the plane's Y (setStage no longer sets it)
+  let y = ov.bgY != null ? ov.bgY : cfg.bgY;
+  if ((S.stage === 'jungle' || S.stage === 'night') && cv.clientWidth > cv.clientHeight) y -= LAND_DROP;
+  bgMesh.position.y = y;
 }
 function setStage(name) {
   const wasGround = isGround();
