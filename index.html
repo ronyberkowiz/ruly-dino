@@ -2310,15 +2310,38 @@ function setBg(bgName) {
    at the portrait bgY only the painting's near foreground fills it and the distant vista (horizon/sky) is
    cropped off the top — reading as "zoomed in". On the ground stages we drop the plane in landscape so the
    wide, more-distant vista shows instead. Called from setBg and on every resize/rotate. */
+const CAM_EYE_Y = 4.3;                                    // camera height == where the true horizon lands on screen
+const CAM_PITCH = Math.atan(2.9 / 16);                    // lookAt(0,1.4,-9) from (0,4.3,7): a slight downward tilt
 function fitBg() {
   if (!curBg) return;
   const cfg = STAGE_CFG[S.stage];
   const mf = window.MANIFEST[curBg]; if (!mf) return;
   const ov = BG_FIT[curBg] || {};
-  const s = (ov.bgW || cfg.bgW) / 260;
+  const bgW = ov.bgW || cfg.bgW;
+  const bgY = ov.bgY != null ? ov.bgY : cfg.bgY;
+  let h = bgW / 260 * 146;                                // authored plane height (world units)
+  let y = bgY;
+  /* GROUND STAGES: fit the height to the actual frame instead of a fixed size. The authored height was
+     tuned for one screen, so on a tall portrait phone the plane's TOP edge sat well above the top of the
+     view and the painting's upper third (the volcano peak / mountain ridge) was cropped away.
+     `f` = the fraction of the painting that lives ABOVE its horizon line, derived from the authored
+     bgY/bgW pair (which is what aligns the painted horizon with the camera's eye-level horizon).
+     We then pick the largest height whose top edge still fits inside the frame, but never smaller than
+     what is needed to cover the frame's width (on landscape the vertical field is short, so filling the
+     width wins and the peak may still crop — a wide screen simply cannot show both). */
+  if (isGround()) {
+    const f = 0.5 - (CAM_EYE_Y - bgY) / (bgW / 260 * 146);
+    const d = camera.position.z - cfg.bgZ;                // distance from the camera to the backdrop plane
+    const halfV = camera.fov * Math.PI / 360;
+    const halfH = Math.atan(Math.tan(halfV) * camera.aspect);
+    const topY = CAM_EYE_Y + d * Math.tan(halfV - CAM_PITCH);   // world Y of the frame's top edge at that distance
+    const hPeak = ((topY - CAM_EYE_Y) / f) * 0.98;        // tallest image whose top edge still shows (2% safety)
+    const hWidth = (2 * d * Math.tan(halfH) * 1.03) / (mf.w / mf.h);   // shortest image that still covers the width
+    h = Math.max(hWidth, hPeak);
+    y = CAM_EYE_Y + h * (f - 0.5);                        // keep the painted horizon on the eye-level horizon
+  }
+  const s = h / 146;
   bgMesh.scale.set(s * (mf.w / mf.h) / (260 / 146), s, 1);
-  let y = ov.bgY != null ? ov.bgY : cfg.bgY;
-  if ((S.stage === 'jungle' || S.stage === 'night') && cv.clientWidth > cv.clientHeight) y -= LAND_DROP;
   bgMesh.position.y = y;
 }
 function setStage(name) {
@@ -2499,6 +2522,7 @@ function reset() {
   if (h.includes('stage=night')) { setStage('night'); S.groundStage = 'night'; S.nextCaveAt = 1e9; }
   if (h.includes('gate')) S.nextCaveAt = 60;
   if (h.includes('frail')) { S.hearts = 1; syncHud(); }
+  if (h.includes('god')) { window.GOD = true; }            // headless screenshots: survive long enough to frame a shot
   if (h.includes('pwr')) { if (window.MANIFEST.bubble) addEnt('bubble', 0, 18); if (window.MANIFEST.magnet) addEnt('magnet', 0, 26); }
   if (h.includes('boost')) addEnt('egg-speed', 0, 16);
   if (h.includes('arch') && window.MANIFEST['stone-gate']) addEnt('stone-gate', 0, 30);
@@ -2537,7 +2561,7 @@ playBtn.addEventListener('click', () => {
 });
 /* one stumble, from an obstacle (en) or an environmental hazard like the lava river (en = null) */
 function takeHit(en) {
-  if (S.invuln > 0 || S.boostT > 0 || S.transitioning) return;
+  if (S.invuln > 0 || S.boostT > 0 || S.transitioning || window.GOD) return;   // GOD: headless screenshot hook
   if (S.shield) {                                        // the bubble takes the hit
     S.shield = false; P.bubble.visible = false;
     if (en) en.dead = true;
