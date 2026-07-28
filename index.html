@@ -1815,12 +1815,12 @@ function buildPlants() {
   const HAZE = 0xb9c9b0;                                   // distant-air tint for far scenery
   if (BG_DINOS.length) for (let i = 0; i < 8; i++) {       // more grazing dinos, spread wider (fills the wide landscape sides)
     const name = BG_DINOS[(Math.random() * BG_DINOS.length) | 0];
-    const g = deco(name, 3.1 + Math.random() * 1.3);
+    const g = deco(name, 4.2 + Math.random() * 1.8);       // round-12: they read as toy-sized at 3.1 — real dinosaur bulk now
     const side = i % 2 ? 1 : -1;
     g.scale.x *= side;
     g.userData.sprite.material.userData.baseTint.set(HAZE);
     g.userData.gap = 3;
-    g.position.set(side * (11 + Math.random() * 9), 0, -(i / 8) * VIEW * 3 - 34);
+    g.position.set(side * (11 + Math.random() * 8), 0, -(i / 8) * VIEW * 3 - 34);
     scene.add(g);
     plants.push(g);
   }
@@ -1845,6 +1845,23 @@ function buildPlants() {
     g.userData.sprite.material.userData.baseTint.set(HAZE);   // aerial haze -> melts into the backdrop
     g.userData.gap = 2;                                       // far row, recycles less often
     g.position.set(side * (9 + Math.random() * 11), 0, -(i / 20) * VIEW * 2 - 22);   // spread wider (x 9-20) + deeper
+    scene.add(g);
+    plants.push(g);
+  }
+  /* MID row (round-12) — the band between the rich roadside verge (x<4.5) and the hazy far row (x>9) read
+     as bare grass, especially on a wide screen. This fills x 5-10 with full-colour, mid-sized plants
+     (only lightly hazed) so the scenery thins out gradually instead of dropping off a cliff. */
+  const MID_POOL = [...FAR_BUSH, ...FAR_TREES, 'fern1', 'fern2', 'fern3', 'fern-rainbow', 'plant-pink',
+    'plant-teal', 'flower-bush2', 'nat-ferncluster', 'mushroom'].filter(n => window.MANIFEST[n]);
+  const MID_HAZE = 0xd6ddd0;                                // barely hazed — much closer than the far row
+  if (MID_POOL.length) for (let i = 0; i < 24; i++) {
+    const name = MID_POOL[(Math.random() * MID_POOL.length) | 0];
+    const tall = FAR_TREES.includes(name);
+    const g = deco(name, tall ? 3.4 + Math.random() * 1.8 : 1.6 + Math.random() * 1.6);
+    const side = i % 2 ? 1 : -1;
+    g.scale.x *= side * (Math.random() < 0.5 ? -1 : 1);
+    g.userData.sprite.material.userData.baseTint.set(MID_HAZE);
+    g.position.set(side * (5.2 + Math.random() * 4.6), 0, -(i / 24) * VIEW * 1.5 - 10);
     scene.add(g);
     plants.push(g);
   }
@@ -2293,9 +2310,15 @@ const nightFly = () => S.stage === 'fly' && S.groundStage === 'night' && !!windo
 /* per-BACKDROP framing overrides. bg-night / bg-jungle-rain are painted "closer in" (bigger volcano, less
    sky) than the day bg-jungle, so at the shared bgW they read as zoomed. A smaller bgW zooms them OUT to
    match the day (bgW smaller = more of the image shown). bgY nudged so the smaller plane still meets the horizon. */
+/* `hz` = where the painted HORIZON sits, as a fraction of the image height from its top.
+   `pad` = how much of the image top is pure sky ABOVE the hero subject (the volcano summit / the moon) —
+   i.e. how much may be safely cropped. fitBg guarantees the subject stays in frame, cropping at most
+   `pad`. Measured off the paintings themselves; both are optional (sensible defaults below). */
 const BG_FIT = {
-  'bg-jungle-rain': { bgW: 178 },
-  'bg-volcano': { bgW: 184 },
+  'bg-jungle': { hz: 0.52, pad: 0.28 },                   // cone summit at 0.31; the smoke plume above it is expendable
+  'bg-night': { hz: 0.48, pad: 0.05 },                    // the full moon nearly touches the top edge
+  'bg-volcano': { bgW: 184, hz: 0.60, pad: 0.24 },        // crater rim at 0.27, ash column above
+  'bg-jungle-rain': { bgW: 178, hz: 0.54, pad: 0.30 },    // low storm clouds; the peak sits further down
 };
 const LAND_DROP = 0;                                      // bgY now aligns the horizon for BOTH orientations, so no landscape-specific drop is needed
 let curBg = null;
@@ -2329,20 +2352,40 @@ function fitBg() {
      We then pick the largest height whose top edge still fits inside the frame, but never smaller than
      what is needed to cover the frame's width (on landscape the vertical field is short, so filling the
      width wins and the peak may still crop — a wide screen simply cannot show both). */
+  let crop = 0;                                           // fraction of the image height trimmed off its TOP
   if (isGround()) {
-    const f = 0.5 - (CAM_EYE_Y - bgY) / (bgW / 260 * 146);
+    const f = ov.hz != null ? ov.hz : 0.5 - (CAM_EYE_Y - bgY) / (bgW / 260 * 146);
+    const pad = ov.pad != null ? ov.pad : 0.18;           // pure-sky band above the hero subject: safe to trim
     const d = camera.position.z - cfg.bgZ;                // distance from the camera to the backdrop plane
     const halfV = camera.fov * Math.PI / 360;
     const halfH = Math.atan(Math.tan(halfV) * camera.aspect);
     const topY = CAM_EYE_Y + d * Math.tan(halfV - CAM_PITCH);   // world Y of the frame's top edge at that distance
-    const hPeak = ((topY - CAM_EYE_Y) / f) * 0.98;        // tallest image whose top edge still shows (2% safety)
-    const hWidth = (2 * d * Math.tan(halfH) * 1.03) / (mf.w / mf.h);   // shortest image that still covers the width
-    h = Math.max(hWidth, hPeak);
-    y = CAM_EYE_Y + h * (f - 0.5);                        // keep the painted horizon on the eye-level horizon
+    const avail = topY - CAM_EYE_Y;                       // room the frame gives ABOVE the horizon
+    /* base height: enough to cover the frame's width, and (on a tall portrait frame, where that is not
+       enough) enough for the horizon-aligned painting to reach the TOP of the frame — otherwise the sky
+       above the backdrop showed through as a pale band. */
+    const hFull = Math.max((2 * d * Math.tan(halfH) * 1.03) / (mf.w / mf.h), (avail / f) * 1.02);
+    /* The painting devotes ~50% of its height to sky; a landscape phone (2400x1080) gives the frame only
+       ~23% above the horizon, so the width-filling image cannot show all its sky -> the cropped summit.
+       Fix in two steps, in this order:
+       1. TRIM the pure sky above the subject off the top of the texture (up to `pad`) — costs nothing.
+       2. If that is not enough, SINK the plane for the remainder: the painted horizon drops below eye
+          level and the painting's lower band hides behind the ground/treeline (opaque up there anyway).
+       Either way the subject's top lands exactly on the frame's top edge, so the peak/moon always shows.
+       On portrait nothing is needed: the whole painting fits with its horizon on the eye-level horizon. */
+    crop = Math.min(pad, Math.max(0, (f * hFull - avail) / hFull));
+    h = hFull * (1 - crop);
+    const above = hFull * (f - crop), below = hFull * (1 - f);    // visible parts either side of the painted horizon
+    const sink = Math.max(0, above - avail);
+    y = CAM_EYE_Y - sink + (above - below) / 2;
   }
-  const s = h / 146;
-  bgMesh.scale.set(s * (mf.w / mf.h) / (260 / 146), s, 1);
+  const worldW = (h / (1 - crop)) * (mf.w / mf.h);        // width stays the FULL image width (only the top is trimmed)
+  bgMesh.scale.set(worldW / 260, h / 146, 1);
   bgMesh.position.y = y;
+  if (bgMat.map) {                                        // apply the top trim as a UV window (v: 0 .. 1-crop)
+    bgMat.map.repeat.y = 1 - crop; bgMat.map.offset.y = 0;
+    bgMat.map.needsUpdate = true;
+  }
 }
 function setStage(name) {
   const wasGround = isGround();
